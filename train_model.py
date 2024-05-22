@@ -101,23 +101,14 @@ if __name__ == '__main__':
         city_data, synthetic_data, data_mean, data_std, adj_mx = load_chengdu_data_new("data/1_client_chengdu_inflow.npy",
                         "data/1_client_chengdu_synth.npy")
 
-        print("MEan: ", data_mean)
-        city_data = city_data[0].reshape(-1,1440,100)
-        synthetic_data = synthetic_data[0].reshape(-1,480,100)
-
-        # loading synthetic data in training data form for study on pre-training, need to load each client scenario
-        city_data, synthetic_data, data_mean, data_std, adj_mx = load_chengdu_data_new(f"data/{num_clients}_client_chengdu_synth.npy",
-                        f"data/{num_clients}_client_chengdu_synth.npy")
     
     elif city == 'xian':
         # load datasets and adjacency matrix
         city_data, synthetic_data, data_mean, data_std, adj_mx = load_chengdu_data_new("data/xian/1_client_xian_inflow.npy",
                         "data/xian/1_client_xian_synth.npy")
 
-        city_data = city_data[0].reshape(-1,1440,100)
-        synthetic_data = synthetic_data[0].reshape(-1,480,100)
 
-    #split data into train, eval, test data by 0.7, 0.2, 0.1 scale respectively
+    #split data into train, eval, test data by 0.6, 0.2, 0.2 scale respectively
     train_data, eval_data, test_data = [],[],[]
 
     for i in range(num_clients):
@@ -164,9 +155,6 @@ if __name__ == '__main__':
         evaluation_data[0][0] = torch.cat((evaluation_data[0][0], x_train), dim=0)
         evaluation_data[0][1] = torch.cat((evaluation_data[0][1], y_train), dim=0)
 
-    print("Final shape eval x data: ", evaluation_data[0][0].shape)
-    print("Final shape eval y data: ", evaluation_data[0][1].shape)
-
     testing_data = []
     x_train, y_train = data_transform(test_data[0], window, n_pred, device)
     testing_data.append([x_train, y_train])
@@ -174,9 +162,6 @@ if __name__ == '__main__':
         x_train, y_train = data_transform(test_data[i], window, n_pred, device)
         testing_data[0][0] = torch.cat((testing_data[0][0], x_train), dim=0)
         testing_data[0][1] = torch.cat((testing_data[0][1], y_train), dim=0)
-
-    print("Final shape test x data: ", testing_data[0][0].shape)
-    print("Final shape test y data: ", testing_data[0][1].shape)
 
     #turn into pytorch TensorDataset type
     train_tensor = [torch.utils.data.TensorDataset(partition[0], partition[1]) for partition in training_data]

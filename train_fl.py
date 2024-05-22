@@ -117,10 +117,7 @@ if city == 'xian':
      f"data/xian/{num_clients}_client_xian_synth.npy")
 
     print("Mean data: ", data_mean)
-#50
-# city_data, synthetic_data, data_mean, data_std, adj_mx = load_chengdu_data_new("/home/fermino/Documents/Repositories/Didi_Chuxing_GPS_Processing/chengdu_2_client_hetero_50/inflow_2_client.npy",
-#      "/home/fermino/Documents/Repositories/DiffTraj_FL_v3/sample/10_days_sampled_total.npy")
-#split data into train, eval, test data by 0.7, 0.2, 0.1 scale respectively
+
 train_data, eval_data, test_data = [],[],[]
 
 
