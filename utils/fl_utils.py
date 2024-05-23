@@ -35,29 +35,6 @@ def set_parameters(model, parameters: List[np.ndarray]):
     state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
     model.load_state_dict(state_dict, strict=True)
 
-# # server centric evaluation method
-# def get_evaluate_fn(model, test_iter, epochs, metrics, data_mean, data_std):
-
-#     def evaluate(
-#         server_round: int, parameters: NDArrays, config: Dict[str, Scalar]
-#     ) -> Optional[Tuple[float, Dict[str, Scalar]]]:
-#         set_parameters(model, parameters)
-#         MAE, RMSE, MAPE, loss = test(model, test_iter, data_mean, data_std)
-#         print(loss)
-#         metrics["train_losses"][0].append(loss)
-#         print(server_round)
-#         print(epochs)
-#         if (server_round%epochs == 0) and server_round>0:
-#             print("AAAAAAAAAAA")
-#             set_parameters(model, parameters)  # Update model with the latest parameters
-#             MAE, RMSE, MAPE, loss = test(model, test_iter, data_mean, data_std)
-#             metrics['test_mae'].append(MAE)
-#             metrics['test_rmse'].append(RMSE)
-#             metrics['test_mape'].append(MAPE)
-#             return loss, {"MAPE": MAPE}
-
-    # return evaluate
-
 
 def get_parameters(model) -> List[np.ndarray]:
     return [val.cpu().numpy() for _, val in model.state_dict().items()]
@@ -100,12 +77,6 @@ class FedBNFlowerClient(FlowerClient):
 
     def __init__(self, save_path: Path, client_id: int, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # For FedBN clients we need to persist the state of the BN
-        # layers across rounds. In Simulation clients are statess
-        # so everything not communicated to the server (as it is the
-        # case as with params in BN layers of FedBN clients) is lost
-        # once a client completes its training. An upcoming version of
-        # Flower suports stateful clients
         save_path = Path(save_path)
         bn_state_dir = save_path / "bn_states"
         bn_state_dir.mkdir(exist_ok=True)
@@ -513,16 +484,6 @@ def train_prox(model, train_iter, local_epochs, mu, lr):
             n += y.shape[0]
         print("Epoch: ", epoch, ", Train loss:", l_sum / n)
 
-
-
-
-
-# test function
-
-#we want to pass test_iter which has distinct data_iters, one for each client 
-# we want to evaluate MAE and RMSE at each point, before we mean them, add all the values for a given region between all clients 
-# then we do the mean
-# so we no longer normalise the metrics.
 def test(model, test_iter, mean, std):
     model.eval()
     criterion = nn.MSELoss()

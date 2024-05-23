@@ -19,7 +19,6 @@ def load_chengdu_data_new(data_path, synthetic_data_path):
     return normalised_X, normalised_synth_X, X_mean, X_std, A
 
 def calculate_adjacency_matrix(n_rows=10, m_columns=10):
-    #to improve results, you can change the threshold value of filter in adjacency matrix, or use different distance calculator, or try normalising matrix somehow
 
     distance_matrix = np.zeros(((n_rows * m_columns), (n_rows * m_columns)), dtype=np.float32)
 
@@ -250,3 +249,36 @@ def train_model(model, epochs, train_iter, loss, optimizer, scheduler, eval_iter
         train_losses.append(l_sum / n)
     #need to test every model
     return model, min_val_loss, train_losses
+
+def results_checkpoint_path(model_name, num_clients, n_pred):
+    results_path = os.path.dirname(os.path.abspath(__file__)) +"/results/fl"
+    result_directories = [file for file in os.listdir(results_path)]
+
+    if model_name in result_directories:
+        client_cases = [file for file in os.listdir(results_path + f"/{model_name}")]
+        if not(f"{num_clients}_clients" in client_cases):
+            model_client_path = results_path + f"/{model_name}/{num_clients}_clients"
+            os.mkdir(model_client_path)
+            results_path = model_client_path+f"/metrics_{n_pred}model.csv"
+        model_client_path = results_path + f"/{model_name}/{num_clients}_clients"
+        results_path = model_client_path+f"/metrics_{n_pred}model.csv"
+    else:
+        os.mkdir(results_path + f"/{model_name}")
+        model_client_path = results_path + f"/{model_name}/{num_clients}_clients"
+        os.mkdir(model_client_path)
+        results_path = model_client_path+f"/metrics_{n_pred}model.csv"
+
+    checkpoint_path = os.path.dirname(os.path.abspath(__file__)) +"/checkpoints/fl"
+    checkpoint_directories = [file for file in os.listdir(checkpoint_path)]
+    if model_name in checkpoint_directories:
+        client_cases = [file for file in os.listdir(checkpoint_path + f"/{model_name}")]
+        if not(f"{num_clients}_clients" in client_cases):
+            checkpoint_path = checkpoint_path + f"/{model_name}/{num_clients}_clients"
+            os.mkdir(checkpoint_path)
+        checkpoint_path = checkpoint_path + f"/{model_name}/{num_clients}_clients"
+    else:
+        os.mkdir(checkpoint_path + f"/{model_name}")
+        checkpoint_path = checkpoint_path + f"/{model_name}/{num_clients}_clients"
+        os.mkdir(checkpoint_path)
+
+    return results_path, checkpoint_path
