@@ -8,6 +8,7 @@ import os
 import flwr as fl
 from typing import List, Tuple, Union, Optional, Dict
 from collections import OrderedDict
+from config import params
 
 import argparse 
 
@@ -17,11 +18,11 @@ from models.gwnet import GWNET
 from models.stgcn import STGCN
 from models.tau import SimVP
 from models.gatau import GATAU
-from models.mgat_tau import ASTGCN
 from csv import writer
 
 from utils.utils import load_chengdu_data_new, data_loader, data_transform, evaluate_mape, evaluate_model, load_adj
-from utils.fl_utils import set_parameters, get_parameters, FlowerClient, FedAvgSave, FedProxSave, FedOptSave, train, test, FedBNFlowerClient
+from utils.fl_utils import set_parameters, get_parameters, FlowerClient, FedAvgSave, FedProxSave, FedOptSave
+from types import SimpleNamespace
 
 
 
@@ -59,8 +60,8 @@ parser.add_argument("--model_name", required=True, help="Name of model", type=st
 parser.add_argument("--epochs", required=True, help="Number of epochs to run for", type=int)
 parser.add_argument("--city", required=True, help="Name of city", type=str)
 parser.add_argument("--FL_method", required=True, help="FL method", type=str)
-parser.add_argument("--loc_ratio", type=int)
-parser.add_argument("--initial_params", type=int)
+parser.add_argument("--loc_ratio", type=int, default=1)
+parser.add_argument("--initial_params", type=bool, default=False)
 args = vars(parser.parse_args())
 
 num_clients = args['num_clients']
@@ -71,15 +72,58 @@ FL_method = args['FL_method']
 loc_ratio = args['loc_ratio']
 initial_params = bool(args['initial_params'])
 
+# Load configuration
+temp = {}
+for k, v in params.items():
+    temp[k] = SimpleNamespace(**v)
+config = SimpleNamespace(**temp)
+
 max_epochs = epochs
 epochs = int(max_epochs/loc_ratio)
 local_rounds = loc_ratio
 
-results_path, checkpoint_path = results_checkpoint_path(model_name, num_clients, n_pred)
+results_path = os.path.dirname(os.path.abspath(__file__)) +"/results/fl"
+result_directories = [file for file in os.listdir(results_path)]
+
+if model_name in result_directories:
+    client_cases = [file for file in os.listdir(results_path + f"/{model_name}")]
+    if not(f"{num_clients}_clients" in client_cases):
+        model_client_path = results_path + f"/{model_name}/{num_clients}_clients"
+        os.mkdir(model_client_path)
+        results_path = model_client_path+f"/metrics_{n_pred}model.csv"
+    else:
+        model_client_path = results_path + f"/{model_name}/{num_clients}_clients"
+        results_path = model_client_path+f"/metrics_{n_pred}model.csv"
+else:
+    os.mkdir(results_path + f"/{model_name}")
+    model_client_path = results_path + f"/{model_name}/{num_clients}_clients"
+    os.mkdir(model_client_path)
+    results_path = model_client_path+f"/metrics_{n_pred}model.csv"
+
+checkpoint_path = os.path.dirname(os.path.abspath(__file__)) +"/checkpoints/fl"
+checkpoint_directories = [file for file in os.listdir(checkpoint_path)]
+if model_name in checkpoint_directories:
+    client_cases = [file for file in os.listdir(checkpoint_path + f"/{model_name}")]
+    if not(f"{num_clients}_clients" in client_cases):
+        checkpoint_path = checkpoint_path + f"/{model_name}/{num_clients}_clients"
+        os.mkdir(checkpoint_path)
+    else:
+        checkpoint_path = checkpoint_path + f"/{model_name}/{num_clients}_clients"
+else:
+    os.mkdir(checkpoint_path + f"/{model_name}")
+    checkpoint_path = checkpoint_path + f"/{model_name}/{num_clients}_clients"
+    os.mkdir(checkpoint_path)
+print("Checkpoint path: ", checkpoint_path)
 
 # load datasets and adjacency matrix
-city_data, synthetic_data, data_mean, data_std, adj_mx = load_chengdu_data_new(f"data/{num_clients}_client_chengdu_inflow.npy",
-     f"data/{num_clients}_client_chengdu_synth.npy")
+if city == 'chengdu':
+    city_data, synthetic_data, data_mean, data_std, adj_mx = load_chengdu_data_new(f"data/chengdu/{num_clients}_client_chengdu_inflow.npy",
+         f"data/chengdu/{num_clients}_client_chengdu_synth.npy")
+
+if city == 'xian':
+    city_data, synthetic_data, data_mean, data_std, adj_mx = load_chengdu_data_new(f"data/xian/{num_clients}_client_xian_inflow.npy",
+     f"data/xian/{num_clients}_client_xian_synth.npy")
+
 
 train_data, eval_data, test_data = [],[],[]
 
@@ -95,7 +139,10 @@ training_data = [data_transform(train_data[i], window, n_pred, device) for i in 
 evaluation_data = [data_transform(eval_data[i], window, n_pred, device) for i in range(num_clients)]
 testing_data = [data_transform(test_data[i], window, n_pred, device) for i in range(num_clients)]
 
-if FL_method == "FedSTS":
+# load generated data from DiffTraj Model
+# process generated data into regional flows within interval, then append to training data for each client
+
+if FL_method == "FedTPS":
     training_data = []
     for i in range(num_clients):
         x_synth, y_synth = data_transform(synthetic_data[0], window, n_pred, device)
@@ -113,6 +160,8 @@ test_tensor = [torch.utils.data.TensorDataset(partition[0], partition[1]) for pa
 trainloaders = [torch.utils.data.DataLoader(dataset, batch_size, shuffle = True, drop_last=True) for dataset in train_tensor]
 evalloaders = [torch.utils.data.DataLoader(dataset, batch_size, shuffle = True, drop_last=True) for dataset in eval_tensor]
 testloaders = [torch.utils.data.DataLoader(dataset, batch_size, shuffle = True, drop_last=True) for dataset in test_tensor]
+
+test_iter = testloaders
 
 
 #save metrics variable to which you will append results to
@@ -136,15 +185,11 @@ if model_name == "STGCN":
         """Create a Flower client representing a single organization."""
 
         # Load model
-        # model instantiation
-        blocks = [1, 64, 64, 64, 64, 64, 32, 32, 128, 128]
-        drop_prob = 0.3
-        n=100
-        kt=3   #kernel size conv
+        #model instantiation
         model = STGCN(
-            blocks, window, kt, n, G, device, drop_prob, control_str="TSTNDTSTND"
+            config.STGCN.blocks, window, config.STGCN.kt, config.STGCN.n, G, device, config.STGCN.drop_prob, control_str="TSTNDTSTND"
         ).to(device)
-        lr=1e-3
+        lr=config.STGCN.lr
 
         # Note: each client gets a different trainloader/valloader, so each client
         # will train and evaluate on their own unique data
@@ -156,27 +201,19 @@ if model_name == "STGCN":
 
         # Create a  single Flower client representing a single organization
 
-        # Different client call if FedBN called
-        if FL_method == "FedBN":
-            return FedBNFlowerClient(model=model, trainloader=trainloader, valloader=evalloader, testloader=testloader, 
-            data_mean=client_mean, data_std=client_std, local_rounds=local_rounds, save_path=f"FedBN/{model_name}/{num_clients}_clients", client_id=cid, lr=lr)
-        elif FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedSTS" or FL_method == "FedOpt":
+        if FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedTPS" or FL_method == "FedOpt":
             return FlowerClient(model, trainloader, evalloader, testloader, client_mean, client_std, local_rounds, lr=lr).to_client()
         else:
             print("FL method not defined")
 
     # model instantiation
-    blocks = [1, 64, 64, 64, 64, 64, 32, 32, 128, 128]
-    drop_prob = 0.3
-    n=100
-    kt=3   #kernel size conv
     model = STGCN(
-        blocks, window, kt, n, G, device, drop_prob, control_str="TSTNDTSTND"
+        config.STGCN.blocks, window, config.STGCN.kt, config.STGCN.n, G, device, config.STGCN.drop_prob, control_str="TSTNDTSTND"
     ).to(device)
 
 elif model_name == "DCRNN":
-    # process adjacency matrix, DCRNN also uses the doubletransition.
-
+    # process adjacency matrix, DCRNN also uses the doubletransition. Assuming asymmetric adjacency matrix.
+    # takes one adjacency matrix
     adj_mx = load_adj(adj_mx, 'doubletransition')
 
     # function which allows flower to instantiate new clients
@@ -184,11 +221,8 @@ elif model_name == "DCRNN":
         """Create a Flower client representing a single organization."""
 
         # model instantiation
-        input_dim = 1
-        num_nodes = 100
-        output_dim = 1
-        model = DCRNN(device, num_nodes=num_nodes, input_dim=input_dim, out_horizon=output_dim, P=adj_mx).to(device)
-        lr=1e-3
+        model = DCRNN(device, num_nodes=config.DCRNN.num_nodes, input_dim=config.DCRNN.input_dim, out_horizon=config.DCRNN.output_dim, P=adj_mx).to(device)
+        lr=config.DCRNN.lr
 
 
         # Note: each client gets a different trainloader/valloader, so each client
@@ -199,46 +233,30 @@ elif model_name == "DCRNN":
         client_std = data_std[int(cid)]
         testloader = testloaders
 
-        # Different client call if FedBN called
-        if FL_method == "FedBN":
-            return FedBNFlowerClient(model=model, trainloader=trainloader, valloader=evalloader, testloader=testloader, 
-            data_mean=client_mean, data_std=client_std, local_rounds=local_rounds, save_path=f"FedBN/{model_name}/{num_clients}_clients", client_id=cid, lr=lr)
-        elif FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedSTS" or FL_method == "FedOpt":
+        if FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedTPS" or FL_method == "FedOpt":
             return FlowerClient(model, trainloader, evalloader, testloader, client_mean, client_std, local_rounds, lr=lr).to_client()
         else:
             print("FL method not defined")
 
     # load model for server side parameter evaluation
     # model instantiation
-    input_dim = 1
-    num_nodes = 100
-    output_dim = 1
-    model = DCRNN(device, num_nodes=num_nodes, input_dim=input_dim, out_horizon=output_dim, P=adj_mx).to(device)
+    model = DCRNN(device, num_nodes=config.DCRNN.num_nodes, input_dim=config.DCRNN.input_dim, out_horizon=config.DCRNN.output_dim, P=adj_mx).to(device)
 
 elif model_name == "GWNET":
     # process adjacency matrix
     adj_mx = load_adj(adj_mx, 'doubletransition')
-    np.set_printoptions(threshold=np.inf)
-    print(adj_mx[0])
     supports = [torch.tensor(i).to(device) for i in adj_mx]
 
     # random adjacency matrix initialisation
     adjinit = None
 
-    drop_prob = 0.3
 
     # function which allows flower to instantiate new clients
     def client_fn(cid: str) -> FlowerClient:
         """Create a Flower client representing a single organization."""
 
-        # model instantiation
-        gcn_bool = True              # add a graph conv layer
-        addaptadj = True             # add an adaptive adjacency matrix
-        in_dim = 1                   # dimension of channel size of input 
-        out_dim = 1                  # dimension fo channel size of output, this changes when using multi-step prediction
-        n_hid = 32                   # dimension of hidden residual channel
-        model = GWNET(device, n, drop_prob, supports=supports, gcn_bool=gcn_bool, addaptadj=addaptadj, aptinit=adjinit, in_dim=in_dim, 
-        out_dim=out_dim, residual_channels=n_hid, dilation_channels=n_hid, skip_channels=n_hid * 8, end_channels=n_hid * 16).to(device)
+        model = GWNET(device, n, config.GWNET.drop_prob, supports=supports, gcn_bool=config.GWNET.gcn_bool, addaptadj=config.GWNET.addaptadj, aptinit=adjinit, in_dim=config.GWNET.in_dim,
+        out_dim=config.GWNET.out_dim, residual_channels=config.GWNET.n_hid, dilation_channels=config.GWNET.n_hid, skip_channels=config.GWNET.n_hid * 8, end_channels=config.GWNET.n_hid * 16).to(device)
         lr=1e-3
 
 
@@ -250,24 +268,16 @@ elif model_name == "GWNET":
         client_std = data_std[int(cid)]
         testloader = testloaders
 
-        # Different client call if FedBN called
-        if FL_method == "FedBN":
-            return FedBNFlowerClient(model=model, trainloader=trainloader, valloader=evalloader, testloader=testloader, 
-            data_mean=client_mean, data_std=client_std, local_rounds=local_rounds, save_path=f"FedBN/{model_name}/{num_clients}_clients", client_id=cid, lr=lr)
-        elif FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedSTS" or FL_method == "FedOpt":
+        if FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedTPS" or FL_method == "FedOpt":
             return FlowerClient(model, trainloader, evalloader, testloader, client_mean, client_std, local_rounds, lr=lr).to_client()
         else:
             print("FL method not defined")
 
     # load model for server side parameter evaluation
     # model instantiation
-    gcn_bool = True              # add a graph conv layer
-    addaptadj = True             # add an adaptive adjacency matrix
-    in_dim = 1                   # dimension of channel size of input 
-    out_dim = 1                  # dimension fo channel size of output, this changes when using multi-step prediction
-    n_hid = 32                   # dimension of hidden residual channel
-    model = GWNET(device, n, drop_prob, supports=supports, gcn_bool=gcn_bool, addaptadj=addaptadj, aptinit=adjinit, in_dim=in_dim, 
-    out_dim=out_dim, residual_channels=n_hid, dilation_channels=n_hid, skip_channels=n_hid * 8, end_channels=n_hid * 16).to(device)
+    model = GWNET(device, n, config.GWNET.drop_prob, supports=supports, gcn_bool=config.GWNET.gcn_bool, addaptadj=config.GWNET.addaptadj,
+                  aptinit=adjinit, in_dim=config.GWNET.in_dim, out_dim=config.GWNET.out_dim, residual_channels=config.GWNET.n_hid,
+                  dilation_channels=config.GWNET.n_hid, skip_channels=config.GWNET.n_hid * 8, end_channels=config.GWNET.n_hid * 16).to(device)
 
 elif model_name == "GRU":
     # function which allows flower to instantiate new clients
@@ -275,15 +285,9 @@ elif model_name == "GRU":
         """Create a Flower client representing a single organization."""
 
         # model instantiation
-        hidden_size = 32
-        num_layers = 3
-        output_size = 1
-        input_size = 1
-        num_nodes = 100
         lr=1e-3
 
-
-        model = GRU(input_size, hidden_size, num_layers, output_size, batch_size, num_nodes, window).to(device)
+        model = GRU(config.GRU.input_size, config.GRU.hidden_size, config.GRU.num_layers, config.GRU.output_size, batch_size, num_nodes, window).to(device)
 
         # Note: each client gets a different trainloader/valloader, so each client
         # will train and evaluate on their own unique data
@@ -293,48 +297,27 @@ elif model_name == "GRU":
         client_std = data_std[int(cid)]
         testloader = testloaders
 
-        # Different client call if FedBN called
-        if FL_method == "FedBN":
-            return FedBNFlowerClient(model=model, trainloader=trainloader, valloader=evalloader, testloader=testloader, 
-            data_mean=client_mean, data_std=client_std, local_rounds=local_rounds, save_path=f"FedBN/{model_name}/{num_clients}_clients", client_id=cid, lr=lr)
-        elif FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedSTS" or FL_method == "FedOpt":
+        if FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedTPS" or FL_method == "FedOpt":
             return FlowerClient(model, trainloader, evalloader, testloader, client_mean, client_std, local_rounds, lr=lr).to_client()
         else:
             print("FL method not defined")
 
     # load model for server side parameter evaluation
     # model instantiation
-    hidden_size = 32
-    num_layers = 3
-    output_size = 1
-    input_size = 1
     num_nodes = 100
 
-    model = GRU(input_size, hidden_size, num_layers, output_size, batch_size, num_nodes, window).to(device)
+    model = GRU(config.GRU.input_size, config.GRU.hidden_size, config.GRU.num_layers, config.GRU.output_size, batch_size, num_nodes, window).to(device)
 
 elif model_name == "TAU":
         # function which allows flower to instantiate new clients
     def client_fn(cid: str) -> FlowerClient:
         """Create a Flower client representing a single organization."""
 
-        method = 'TAU'
-        # model
-        spatio_kernel_enc = 3
-        spatio_kernel_dec = 3
-        model_type = "tau"
-        hid_S = 32
-        hid_T = 256
-        N_T = 8
-        N_S = 2
-        # training
         lr = 1e-3
-        drop_path = 0.1
-        sched = 'cosine'
-        warmup_epoch = 5
-        in_shape = (12,1,10,10)
 
-        model = SimVP(in_shape, n_pred, hid_S, hid_T, N_S, N_T, model_type=model_type, mlp_ratio=8., drop=0.0, drop_path=drop_path, spatio_kernel_enc=spatio_kernel_enc,
-                spatio_kernel_dec=spatio_kernel_dec, act_inplace=True).to(device)
+        model = SimVP(config.TAU.in_shape, n_pred, config.TAU.hid_S, config.TAU.hid_T, config.TAU.N_S, config.TAU.N_T,
+        model_type=config.TAU.model_type, mlp_ratio=8., drop=0.0, drop_path=config.TAU.drop_path, spatio_kernel_enc=config.TAU.spatio_kernel_enc,
+        spatio_kernel_dec=config.TAU.spatio_kernel_dec, act_inplace=True).to(device)
 
 
         # Note: each client gets a different trainloader/valloader, so each client
@@ -345,17 +328,12 @@ elif model_name == "TAU":
         client_std = data_std[int(cid)]
         testloader = testloaders
 
-        # Different client call if FedBN called
-        if FL_method == "FedBN":
-            return FedBNFlowerClient(model=model, trainloader=trainloader, valloader=evalloader, testloader=testloader, 
-            data_mean=client_mean, data_std=client_std, local_rounds=local_rounds, save_path=f"FedBN/{model_name}/{num_clients}_clients", client_id=cid, lr=lr)
-        elif FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedSTS" or FL_method == "FedOpt":
+        if FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedTPS" or FL_method == "FedOpt":
             return FlowerClient(model, trainloader, evalloader, testloader, client_mean, client_std, local_rounds, lr=lr).to_client()
         else:
             print("FL method not defined")
 
     method = 'TAU'
-    # model
     spatio_kernel_enc = 3
     spatio_kernel_dec = 3
     model_type = "tau"
@@ -363,52 +341,30 @@ elif model_name == "TAU":
     hid_T = 256
     N_T = 8
     N_S = 2
-    # training
     lr = 5e-4
     drop_path = 0.1
     sched = 'cosine'
     warmup_epoch = 5
     in_shape = (12,1,10,10)
 
-    model = SimVP(in_shape, n_pred, hid_S, hid_T, N_S, N_T, model_type=model_type, mlp_ratio=8., drop=0.0, drop_path=drop_path, spatio_kernel_enc=spatio_kernel_enc,
-            spatio_kernel_dec=spatio_kernel_dec, act_inplace=True).to(device)
+    model = SimVP(config.TAU.in_shape, n_pred, config.TAU.hid_S, config.TAU.hid_T, config.TAU.N_S, config.TAU.N_T, model_type=config.TAU.model_type,
+                mlp_ratio=8., drop=0.0, drop_path=config.TAU.drop_path, spatio_kernel_enc=config.TAU.spatio_kernel_enc,
+                spatio_kernel_dec=config.TAU.spatio_kernel_dec, act_inplace=True).to(device)
 
 elif model_name == "GATAU":
-        # function which allows flower to instantiate new clients
     def client_fn(cid: str) -> FlowerClient:
         """Create a Flower client representing a single organization."""
 
-        method = 'TAU'
-        # model
-        spatio_kernel_enc = 3
-        spatio_kernel_dec = 3
-        model_type = "tau"
-        hid_S = 16
-        hid_T = 256
-        N_T = 8
-        N_S = 2
-        # training
         lr = 1e-4
-        drop_path = 0.1
-        sched = 'cosine'
-        warmup_epoch = 5
-        in_shape = (12,1,10,10)
 
         sparse_adjacency_matrix = sp.coo_matrix(adj_mx)
         G = dgl.from_scipy(sparse_adjacency_matrix)
         G = G.to(device)
 
-        # SINGLE LAYER
 
-        # lr 5e-4, hid_S 32, tau, MAPE 80
-        # lr 1e-3, hid_S 32, tau, MAPE >50
-        # lr 1e-3, hid_S 16, tau, MAPE <50
-
-        #DOUBLE LAYER 
-
-
-        model = GATAU(in_shape, n_pred, G, hid_S, hid_T, N_S, N_T, model_type=model_type, mlp_ratio=8., drop=0.0, drop_path=drop_path, spatio_kernel_enc=spatio_kernel_enc,
-                 spatio_kernel_dec=spatio_kernel_dec, act_inplace=True).to(device)
+        model = GATAU(config.GATAU.in_shape, n_pred, G, config.GATAU.hid_S, config.GATAU.hid_T, config.GATAU.N_S, config.GATAU.N_T, model_type='tau',
+                mlp_ratio=8., drop=0.0, drop_path=config.GATAU.drop_path, spatio_kernel_enc=config.GATAU.spatio_kernel_enc,
+                spatio_kernel_dec=config.GATAU.spatio_kernel_dec, act_inplace=True).to(device)
 
         # Note: each client gets a different trainloader/valloader, so each client
         # will train and evaluate on their own unique data
@@ -418,11 +374,7 @@ elif model_name == "GATAU":
         client_std = data_std[int(cid)]
         testloader = testloaders
 
-        # Different client call if FedBN called
-        if FL_method == "FedBN":
-            return FedBNFlowerClient(model=model, trainloader=trainloader, valloader=evalloader, testloader=testloader, 
-            data_mean=client_mean, data_std=client_std, local_rounds=local_rounds, save_path=f"FedBN/{model_name}/{num_clients}_clients", client_id=cid, lr=lr)
-        elif FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedSTS" or FL_method == "FedOpt":
+        if FL_method == "FedAvg" or FL_method == "FedProx" or FL_method == "FedTPS" or FL_method == "FedOpt":
             return FlowerClient(model, trainloader, evalloader, testloader, client_mean, client_std, local_rounds, lr=lr).to_client()
         else:
             print("FL method not defined")
@@ -447,34 +399,37 @@ elif model_name == "GATAU":
     warmup_epoch = 5
     in_shape = (12,1,10,10)
 
-    model = GATAU(in_shape, n_pred, G, hid_S, hid_T, N_S, N_T, model_type=model_type, mlp_ratio=8., drop=0.0, drop_path=drop_path, spatio_kernel_enc=spatio_kernel_enc,
-                 spatio_kernel_dec=spatio_kernel_dec, act_inplace=True).to(device)
+    model = GATAU(config.GATAU.in_shape, n_pred, G, config.GATAU.hid_S, config.GATAU.hid_T, config.GATAU.N_S,
+                  config.GATAU.N_T, model_type='tau',
+                  mlp_ratio=8., drop=0.0, drop_path=config.GATAU.drop_path,
+                  spatio_kernel_enc=config.GATAU.spatio_kernel_enc,
+                  spatio_kernel_dec=config.GATAU.spatio_kernel_dec, act_inplace=True).to(device)
 
+# code below specifies flower config for FL algorithm used, and whether pre-trained model will be loaded
 if initial_params == False:
-    if FL_method == "FedAvg" or FL_method == "FedBN" or FL_method == "FedSTS":
+    if FL_method == "FedAvg" or FL_method == "FedBN" or FL_method == "FedTPS":
         # FedAvg strategy
         strategy = FedAvgSave(
-            fraction_fit=1.0,  # Sample 100% of available clients for training
-            fraction_evaluate=1.0,  # Sample 100% of available clients for evaluation
-            min_fit_clients=num_clients,  # Never sample less than all clients for training
-            min_evaluate_clients=num_clients,  # Never sample less than half clients for evaluation
-            min_available_clients=num_clients,  # Wait until all clients are available
-            checkpoint_path = checkpoint_path,     #checkpoint path to save model parameters
-            n_pred = n_pred,              #used to save model to correct file
-            epochs = epochs,                 #used to save model at the end of training
-            model = model,                   #pass model for final step centralised evaluation
-            test_iter = testloaders,
+            fraction_fit=1.0,
+            fraction_evaluate=1.0,
+            min_fit_clients=num_clients,
+            min_evaluate_clients=num_clients,
+            min_available_clients=num_clients,
+            checkpoint_path = checkpoint_path,
+            n_pred = n_pred,
+            epochs = epochs,
+            model = model,
+            test_iter = test_iter,
             data_mean = data_mean,
             data_std = data_std,
             metric_results = metric_results
-            #on_fit_config_fn
         )
 
     elif FL_method == "FedProx":
         ## FedProx strategy
         strategy = FedProxSave(
             fraction_fit=1.0,  # Sample 100% of available clients for training
-            fraction_evaluate=1.0,  # Sample 100% of available clients for evaluation
+            fraction_evaluate=1.0,  # Sample 50% of available clients for evaluation
             min_fit_clients=num_clients,  # Never sample less than all clients for training
             min_evaluate_clients=num_clients/2,  # Never sample less than half clients for evaluation
             min_available_clients=num_clients,  # Wait until all clients are available
@@ -482,12 +437,11 @@ if initial_params == False:
             n_pred = n_pred,              #used to save model to correct file
             epochs = epochs,                 #used to save model at the end of training
             model = model,                   #pass model for final step centralised evaluation
-            test_iter = testloaders,
+            test_iter = test_iter,
             data_mean = data_mean,
             data_std = data_std,
             metric_results = metric_results,
             proximal_mu = 0.001
-            #on_fit_config_fn
         )
 
     elif FL_method == "FedOpt":
@@ -495,7 +449,7 @@ if initial_params == False:
         params = fl.common.ndarrays_to_parameters(params)
         strategy = FedOptSave(
             fraction_fit=1.0,  # Sample 100% of available clients for training
-            fraction_evaluate=1.0,  # Sample 100% of available clients for evaluation
+            fraction_evaluate=1.0,  # Sample 50% of available clients for evaluation
             min_fit_clients=num_clients,  # Never sample less than all clients for training
             min_evaluate_clients=num_clients/2,  # Never sample less than half clients for evaluation
             min_available_clients=num_clients,  # Wait until all clients are available
@@ -503,7 +457,7 @@ if initial_params == False:
             n_pred = n_pred,              #used to save model to correct file
             epochs = epochs,                 #used to save model at the end of training
             model = model,                   #pass model for final step centralised evaluation
-            test_iter = testloaders,
+            test_iter = test_iter,
             data_mean = data_mean,
             data_std = data_std,
             metric_results = metric_results,
@@ -513,12 +467,14 @@ if initial_params == False:
             beta_1 = 0.9,
             beta_2 = 0.99,
         )
+
 elif initial_params == True:
-    state_dict = torch.load(f"checkpoints/synthetic/{model_name}/{num_clients}_clients/best_model_6pred.pt")
+    print("Using initial parameters from pre-training!")
+
+    state_dict = torch.load(f"checkpoints/synthetic/{city}/{model_name}/{num_clients}_clients/best_model_6pred.pt")
     model.load_state_dict(state_dict)
     state_dict_ndarrays = [v.cpu().numpy() for v in model.state_dict().values()]
     parameters = fl.common.ndarrays_to_parameters(state_dict_ndarrays)
-
 
     strategy = FedAvgSave(
         fraction_fit=1.0,  # Sample 100% of available clients for training
@@ -530,22 +486,21 @@ elif initial_params == True:
         n_pred = n_pred,              #used to save model to correct file
         epochs = epochs,                 #used to save model at the end of training
         model = model,                   #pass model for final step centralised evaluation
-        test_iter = testloaders,
+        test_iter = test_iter,
         data_mean = data_mean,
         data_std = data_std,
         metric_results = metric_results,
         initial_parameters = parameters
-        #on_fit_config_fn
     )
 else:
     print("Strategy not defined")
 
-# Specify client resources if you need GPU (defaults to 1 CPU and 0 GPU)
+# Specify client resources if you need GPU for flower
 client_resources = None
 if device.type == "cuda":
     client_resources = {"num_gpus": 1}
 
-# Start simulation
+# Start flower simulation
 fl.simulation.start_simulation(
     client_fn=client_fn,
     num_clients=num_clients,
@@ -554,17 +509,28 @@ fl.simulation.start_simulation(
     client_resources=client_resources,
 )
 
+# write metric results to csv file at results_path
 if city == 'chengdu':
-    print("metric_results: ", metric_results)
+
     df = pd.DataFrame.from_dict(metric_results)
-
-    print(df)
-
     df.to_csv(results_path)
-
-    file_name = 'results.csv'
-    row_contents = [city, num_clients, model_name, FL_method, local_rounds, epochs, metric_results['test_mae'][0], 0,metric_results['test_mape'][0]]
+    file_name = 'chengdu_results.csv'
+    row_contents = [city, num_clients, model_name, FL_method, local_rounds, epochs, metric_results['test_mae'][0], 0, metric_results['test_mape'][0]]
 
     with open(file_name, 'a+', newline='') as write_obj:
         csv_writer = writer(write_obj)
         csv_writer.writerow(row_contents)
+
+elif city == 'xian':
+
+    df = pd.DataFrame.from_dict(metric_results)
+    df.to_csv(results_path)
+    file_name = 'xian_results.csv'
+    row_contents = [city, num_clients, model_name, FL_method, local_rounds, epochs, metric_results['test_mae'][0], metric_results['test_rmse'][0], metric_results['test_mape'][0]]
+
+    with open(file_name, 'a+', newline='') as write_obj:
+        csv_writer = writer(write_obj)
+        csv_writer.writerow(row_contents)
+
+else:
+    print("City not defined")

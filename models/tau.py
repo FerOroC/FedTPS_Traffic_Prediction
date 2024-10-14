@@ -1,7 +1,3 @@
-"""
-TAU code taken from https://github.com/chengtan9907/OpenSTL
-"""
-
 import torch 
 from torch import nn
 from timm.layers import trunc_normal_, DropPath

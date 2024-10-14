@@ -35,7 +35,6 @@ def set_parameters(model, parameters: List[np.ndarray]):
     state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
     model.load_state_dict(state_dict, strict=True)
 
-
 def get_parameters(model) -> List[np.ndarray]:
     return [val.cpu().numpy() for _, val in model.state_dict().items()]
 
@@ -70,64 +69,6 @@ class FlowerClient(fl.client.NumPyClient):
         MAE, RMSE, MAPE, loss = test(self.model, self.testloader, self.data_mean, self.data_std)
         #print("MAE: ", MAE, ", RMSE: ", RMSE, ", MAPE: ", MAPE, ", Loss: ", loss)
         return float(loss), len(self.valloader), {"MAPE": float(MAPE), "MAE": float(MAE), "RMSE": float(RMSE)}
-
-
-class FedBNFlowerClient(FlowerClient):
-    """Similar to FlowerClient but this is used by FedBN clients."""
-
-    def __init__(self, save_path: Path, client_id: int, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        save_path = Path(save_path)
-        bn_state_dir = save_path / "bn_states"
-        bn_state_dir.mkdir(exist_ok=True)
-        self.bn_state_pkl = bn_state_dir / f"client_{client_id}.pkl"
-
-    def _save_bn_statedict(self) -> None:
-        """Save contents of state_dict related to BN layers."""
-        bn_state = {
-            name: val.cpu().numpy()
-            for name, val in self.model.state_dict().items()
-            if "bn" in name
-        }
-
-        with open(self.bn_state_pkl, "wb") as handle:
-            pickle.dump(bn_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-    def _load_bn_statedict(self) -> Dict[str, torch.tensor]:
-        """Load pickle with BN state_dict and return as dict."""
-        with open(self.bn_state_pkl, "rb") as handle:
-            data = pickle.load(handle)
-        bn_stae_dict = {k: torch.tensor(v) for k, v in data.items()}
-        return bn_stae_dict
-
-    def get_parameters(self, config) -> NDArrays:
-        """Return model parameters as a list of NumPy ndarrays w or w/o using BN.
-
-        layers.
-        """
-        # First update bn_state_dir
-        self._save_bn_statedict()
-        # Excluding parameters of BN layers when using FedBN
-        return [
-            val.cpu().numpy()
-            for name, val in self.model.state_dict().items()
-            if "bn" not in name
-        ]
-
-    def set_parameters(self, parameters: NDArrays) -> None:
-        """Set model parameters from a list of NumPy ndarrays Exclude the bn layer if.
-
-        available.
-        """
-        keys = [k for k in self.model.state_dict().keys() if "bn" not in k]
-        params_dict = zip(keys, parameters)
-        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-        self.model.load_state_dict(state_dict, strict=False)
-
-        # Now also load from bn_state_dir
-        if self.bn_state_pkl.exists():  # It won't exist in the first round
-            bn_state_dict = self._load_bn_statedict()
-            self.model.load_state_dict(bn_state_dict, strict=False)
 
 class FedAvgSave(fl.server.strategy.FedAvg):
     def __init__(
@@ -484,6 +425,13 @@ def train_prox(model, train_iter, local_epochs, mu, lr):
             n += y.shape[0]
         print("Epoch: ", epoch, ", Train loss:", l_sum / n)
 
+
+# test function
+
+#we want to pass test_iter which has distinct data_iters, one for each client 
+# we want to evaluate MAE and RMSE at each point, before we mean them, add all the values for a given region between all clients 
+# then we do the mean
+# so we no longer normalise the metrics.
 def test(model, test_iter, mean, std):
     model.eval()
     criterion = nn.MSELoss()
@@ -503,7 +451,7 @@ def test(model, test_iter, mean, std):
                 l_sum += l.item() * y.shape[0]
                 n += y.shape[0]
                 y = y.detach().cpu().numpy()
-                y = (y * std) + mean                    #unnormalised y
+                y = (y * std) + mean                    # unnormalised y
                 y_pred = y_pred.detach().cpu().numpy()
                 y_pred = (y_pred * std) + mean          # unnormalised y_pred
                 d = np.abs(y - y_pred)

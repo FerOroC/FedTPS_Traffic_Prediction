@@ -1,12 +1,9 @@
-"""
-TAU code taken from https://github.com/chengtan9907/OpenSTL
-"""
-
 import torch 
 from torch import nn
 from timm.layers import trunc_normal_, DropPath
 import math
 import torch.nn.functional as F
+
 from dgl.nn.pytorch import GATConv
 
 
@@ -84,11 +81,49 @@ class MetaBlock(nn.Module):
         super(MetaBlock, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
+        model_type = model_type.lower() if model_type is not None else 'gsta'
 
+        if model_type == 'gsta':
+            self.block = GASubBlock(
+                in_channels, kernel_size=21, mlp_ratio=mlp_ratio,
+                drop=drop, drop_path=drop_path, act_layer=nn.GELU)
+        elif model_type == 'convmixer':
+            self.block = ConvMixerSubBlock(in_channels, kernel_size=11, activation=nn.GELU)
+        elif model_type == 'convnext':
+            self.block = ConvNeXtSubBlock(
+                in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
+        elif model_type == 'hornet':
+            self.block = HorNetSubBlock(in_channels, mlp_ratio=mlp_ratio, drop_path=drop_path)
+        elif model_type in ['mlp', 'mlpmixer']:
+            self.block = MLPMixerSubBlock(
+                in_channels, input_resolution, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
+        elif model_type in ['moga', 'moganet']:
+            self.block = MogaSubBlock(
+                in_channels, mlp_ratio=mlp_ratio, drop_rate=drop, drop_path_rate=drop_path)
+        elif model_type == 'poolformer':
+            self.block = PoolFormerSubBlock(
+                in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
+        elif model_type == 'swin':
+            self.block = SwinSubBlock(
+                in_channels, input_resolution, layer_i=layer_i, mlp_ratio=mlp_ratio,
+                drop=drop, drop_path=drop_path)
+        elif model_type == 'uniformer':
+            block_type = 'MHSA' if in_channels == out_channels and layer_i > 0 else 'Conv'
+            self.block = UniformerSubBlock(
+                in_channels, mlp_ratio=mlp_ratio, drop=drop,
+                drop_path=drop_path, block_type=block_type)
+        elif model_type == 'van':
+            self.block = VANSubBlock(
+                in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path, act_layer=nn.GELU)
+        elif model_type == 'vit':
+            self.block = ViTSubBlock(
+                in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
         elif model_type == 'tau':
             self.block = TAUSubBlock(
                 in_channels, kernel_size=21, mlp_ratio=mlp_ratio,
                 drop=drop, drop_path=drop_path, act_layer=nn.GELU)
+        else:
+            assert False and "Invalid model_type in SimVP"
 
         if in_channels != out_channels:
             self.reduction = nn.Conv2d(
@@ -142,7 +177,7 @@ class GATAU(nn.Module):
 
     def __init__(self, in_shape, n_pred, dgl_graph, hid_S=16, hid_T=256, N_S=4, N_T=4, model_type='gSTA',
                  mlp_ratio=8., drop=0.0, drop_path=0.0, spatio_kernel_enc=3,
-                 spatio_kernel_dec=3, act_inplace=True, multi_head=8, decoder_mid=8, **kwargs):
+                 spatio_kernel_dec=3, act_inplace=True, **kwargs):
         super(GATAU, self).__init__()
         T, C, H, W = in_shape  # T is pre_seq_length
         H, W = int(H / 2**(N_S/2)), int(W / 2**(N_S/2))  # downsample 1 / 2**(N_S/2)
@@ -151,8 +186,8 @@ class GATAU(nn.Module):
         self.g = dgl_graph
         # self.enc = Encoder(C, hid_S, N_S, spatio_kernel_enc, act_inplace=act_inplace)
         # self.dec = Decoder(hid_S, C, N_S, spatio_kernel_dec, act_inplace=act_inplace)
-        self.enc = Encoder(C, hid_S, multi_head)
-        self.dec = Decoder(hid_S, C, decoder_mid)
+        self.enc = Encoder(C, hid_S, 1)
+        self.dec = Decoder(hid_S, C, 1)
 
         self.hid = MidMetaNet(T*hid_S, hid_S, hid_T, N_T,
                         input_resolution=(H, W), model_type=model_type,
@@ -215,26 +250,59 @@ class Encoder(nn.Module):
         # or HW, B, T, C, H_
         return enc_out
 
+# class Decoder(nn.Module):
+#     def __init__(self, hid_S, C, multi_head):
+#         super(Decoder, self).__init__()
+#         self.dec = GATConv(hid_S, hid_S, multi_head)
+#         self.lin_out_1 = nn.Linear(hid_S, 8)
+#         self.lin_out = nn.Linear(8, C)
+    
+#     def forward(self, graph, x):
+#         HW, B, T, H_ = x.shape
+#         # #commented since last run to see if second GATConv is useful
+#         # # shape here is 100, 32, 12, 16
+#         # enc_h = self.dec(graph, x)
+#         # enc_h = enc_h.reshape(HW, B, T, H_)
+#         # # shape here is 100, 32, 12, 16
+#         # #------------------------------------------------------------
+#         enc_hid = self.lin_out_1(x)
+#         enc_out = self.lin_out(enc_hid)
+#         enc_out = enc_out.permute(1,3,2,0)
+#         return enc_out
+
 class Decoder(nn.Module):
-    def __init__(self, hid_S, C, decoder_mid):
+    def __init__(self, hid_S, C, multi_head):
         super(Decoder, self).__init__()
         self.conv_1 = nn.Conv2d(hid_S, hid_S, kernel_size=1)
-        self.conv_2 = nn.Conv2d(hid_S, decoder_mid, kernel_size=1)
-        self.final = nn.Linear(decoder_mid, C)
-
+        self.conv_2 = nn.Conv2d(hid_S, 8, kernel_size=1)
+        self.final = nn.Linear(8, C)
     def forward(self, graph, x):
         HW, B, T, H_ = x.shape
+        # #commented since last run to see if second GATConv is useful
+        # # shape here is 100, 32, 12, 16
+        # enc_h = self.dec(graph, x)
+        # enc_h = enc_h.reshape(HW, B, T, H_)
+        # # shape here is 100, 32, 12, 16
+        # #------------------------------------------------------------
         x = x.permute(1,2,3,0)
         x = x.reshape(B*T, H_, 10,10)
         enc_hid = self.conv_1(x)
         enc_out = self.conv_2(enc_hid)
         _, H_, _, _ = enc_out.shape
+        #B*T, H_, 10, 10
         enc_out = enc_out.reshape(B,-1, H_, HW)
         enc_out = enc_out.permute(0,1,3,2)              #B, T, HW, H_
         final = self.final(enc_out)
         final = final.permute(0,3,1,2)
-
+        # we want output in B, 1, T, HW
         return final
+
+#21 mape at run started oin 8:36
+
+def sampling_generator(N, reverse=False):
+    samplings = [False, True] * (N // 2)
+    if reverse: return list(reversed(samplings[:N]))
+    else: return samplings[:N]
 
 class TAUBlock(nn.Module):
     """The hidden Translator of MetaFormer for SimVP"""

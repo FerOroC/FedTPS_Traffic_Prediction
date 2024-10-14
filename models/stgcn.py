@@ -1,7 +1,3 @@
-"""
-Reference to https://github.com/FelixOpolka/STGCN-PyTorch
-"""
-
 import math
 
 import torch
