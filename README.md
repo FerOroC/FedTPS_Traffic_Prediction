@@ -8,7 +8,7 @@ Once trained, it can be used to generate synthetic data to augment the traffic p
 To train the TFDiff model, install the packages in the requirements.txt file. Then, navigate to the TFDiff file, and run the command
 
 ``
-\\python main.py --num_clients 2 --city chengdu
+python main.py --num_clients 2 --city chengdu
 ``
 
 The trained model can then be used to generate synthetic data in the format specified in FedTPS/gen_data dir. 
