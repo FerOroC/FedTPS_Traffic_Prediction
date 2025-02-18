@@ -59,7 +59,7 @@ if __name__ == '__main__':
     conditional_full = np.load(f'data/{city}/{num_clients}_client/inflow_conditional.npy',
                    allow_pickle=True)
     conditional_full = torch.from_numpy(conditional_full).float()
-    conditional_full = conditional_full[:, -batch_size:]
+    conditional_full = conditional_full[:, :batch_size]
     print("Head shape: ", conditional_full.shape)
 
     extra_data = np.load(f'data/{city}/{num_clients}_client/extra_data.npy', allow_pickle=True)
