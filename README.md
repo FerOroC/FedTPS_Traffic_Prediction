@@ -6,7 +6,7 @@ The first step of the FedTPS framework involves training the diffusion-based gen
 To train the TFDiff model, install the packages in the requirements.txt file. Then, navigate to the TFDiff file, and run the command
 
 ``
-python main.py --num_clients 2 --city chengdu
+python main.py --num_clients 2 --city xian
 ``
 
 The trained model can then be used to generate synthetic data in the format specified in FedTPS/gen_data dir. 
@@ -14,7 +14,7 @@ The trained model can then be used to generate synthetic data in the format spec
 To train the traffic prediction models, navigate to the FedTPS directory, and run the command
 
 ``
-python train_fl.py --num_clients 2 --model_name STGCN --epochs 80 --city chengdu --FL_method FedAvg --gen_samples 480
+python train_fl.py --num_clients 2 --model_name STGCN --epochs 80 --city xian --FL_method FedAvg --gen_samples 480
 ``
 
-where you can replace the model_name and FL_method argument with another suitable model and method. 
+where you can replace the model_name and FL_method argument with another suitable model and method.
